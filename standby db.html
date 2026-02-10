@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oracle Physical Standby Builder</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#06080d;--surface:#0d1526;--card:#111a2e;--border:#1b2b4a;--border2:#2a4070;
+  --blue:#4f8fff;--green:#00d4aa;--orange:#ffb020;--red:#ff4466;--purple:#8b5cf6;
+  --t1:#d8e2f0;--t2:#8899b4;--t3:#566580;
+  --mono:'IBM Plex Mono',monospace;--sans:'Outfit',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--sans);background:var(--bg);color:var(--t1);min-height:100vh}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+.wrap{max-width:1100px;margin:0 auto;padding:30px 20px 80px}
+
+/* BG */
+.bg{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(800px 500px at 15% 5%,rgba(79,143,255,.05),transparent),
+  radial-gradient(600px 700px at 85% 85%,rgba(0,212,170,.03),transparent)}
+
+header{text-align:center;margin-bottom:36px;position:relative;z-index:1}
+.tag{display:inline-flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border);
+  border-radius:99px;padding:7px 18px;font-family:var(--mono);font-size:11px;color:var(--blue);
+  letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px}
+.tag .dot{width:6px;height:6px;background:var(--green);border-radius:50%;animation:bk 2s infinite alternate}
+@keyframes bk{to{opacity:.3}}
+h1{font-size:clamp(28px,4vw,42px);font-weight:800;letter-spacing:-1px;
+  background:linear-gradient(135deg,#fff,var(--blue),var(--green));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sub{color:var(--t2);font-size:15px;max-width:650px;margin:8px auto 0;line-height:1.5}
+
+/* Steps */
+.steps{display:flex;justify-content:center;gap:2px;margin-bottom:32px;flex-wrap:wrap;position:relative;z-index:1}
+.st{display:flex;align-items:center;gap:6px;padding:9px 14px;cursor:pointer;border-radius:8px;
+  font-size:13px;font-weight:500;color:var(--t3);transition:.2s}
+.st:hover{background:rgba(79,143,255,.04)}
+.st.on{color:var(--blue);background:rgba(79,143,255,.07)}
+.st.ok{color:var(--green)}
+.sn{width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:11px;font-weight:600;background:var(--surface);border:1px solid var(--border);transition:.2s}
+.st.on .sn{background:var(--blue);color:#fff;border-color:var(--blue);box-shadow:0 0 14px rgba(79,143,255,.3)}
+.st.ok .sn{background:var(--green);color:#fff;border-color:var(--green)}
+.sarr{color:var(--t3);font-size:9px}
+
+/* Sections */
+.sec{display:none;animation:fu .3s ease;position:relative;z-index:1}
+.sec.on{display:block}
+@keyframes fu{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+.cd{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:26px;margin-bottom:18px}
+.cd-h{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.cd-i{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-size:18px;flex-shrink:0}
+.cd-i.b{background:rgba(79,143,255,.08);border:1px solid rgba(79,143,255,.12)}
+.cd-i.g{background:rgba(0,212,170,.08);border:1px solid rgba(0,212,170,.12)}
+.cd-i.o{background:rgba(255,176,32,.08);border:1px solid rgba(255,176,32,.12)}
+.cd-i.r{background:rgba(255,68,102,.08);border:1px solid rgba(255,68,102,.12)}
+.cd-i.p{background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.12)}
+.cd-t{font-size:16px;font-weight:600}
+.cd-s{font-size:12px;color:var(--t3);margin-top:1px}
+
+.gr{display:grid;gap:14px}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:1fr 1fr 1fr}
+.fw{grid-column:1/-1}
+@media(max-width:700px){.g2,.g3{grid-template-columns:1fr}}
+
+.fg{display:flex;flex-direction:column;gap:4px}
+.fg label{font-size:11px;font-weight:500;color:var(--t2)}
+.fg .rq{color:var(--red);font-size:10px}
+input,select,textarea{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+  padding:10px 12px;font-family:var(--mono);font-size:12px;color:var(--t1);outline:none;width:100%;transition:.2s}
+input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(79,143,255,.1)}
+select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23566580' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
+textarea{resize:vertical;min-height:60px}
+input::placeholder,textarea::placeholder{color:var(--t3)}
+
+.chk{display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer}
+.chk input[type=checkbox]{width:16px;height:16px;accent-color:var(--blue);cursor:pointer}
+.chk label{font-size:13px;cursor:pointer}
+
+.note{border-radius:8px;padding:12px 14px;font-size:11px;line-height:1.5;margin-top:12px}
+.note.i{background:rgba(79,143,255,.04);border:1px solid rgba(79,143,255,.1);color:var(--t2)}
+.note.w{background:rgba(255,176,32,.04);border:1px solid rgba(255,176,32,.1);color:var(--orange)}
+.divider{height:1px;background:var(--border);margin:18px 0}
+.slbl{font-size:13px;font-weight:600;margin-bottom:10px;padding-left:8px;border-left:3px solid var(--blue);margin-left:0}
+
+.nav{display:flex;justify-content:space-between;margin-top:24px}
+.btn{padding:12px 22px;border-radius:10px;font-family:var(--sans);font-size:13px;font-weight:600;
+  cursor:pointer;transition:.2s;border:none;display:inline-flex;align-items:center;gap:6px}
+.btn-g{background:var(--card);border:1px solid var(--border);color:var(--t2)}
+.btn-g:hover{border-color:var(--t3);color:var(--t1)}
+.btn-b{background:linear-gradient(135deg,#4f8fff,#3070e0);color:#fff;box-shadow:0 3px 16px rgba(79,143,255,.2)}
+.btn-b:hover{transform:translateY(-1px);box-shadow:0 5px 24px rgba(79,143,255,.3)}
+.btn-go{background:linear-gradient(135deg,var(--green),#00b090);color:#fff;
+  box-shadow:0 3px 16px rgba(0,212,170,.2);font-size:15px;padding:14px 28px}
+.btn-go:hover{transform:translateY(-1px)}
+
+/* Pipeline */
+.pipe{display:flex;flex-direction:column;gap:6px}
+.ps{display:flex;align-items:center;gap:12px;padding:11px 14px;background:var(--surface);
+  border:1px solid var(--border);border-radius:8px;font-size:12px}
+.ps-i{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+  font-size:13px;flex-shrink:0}
+.ps-info{flex:1}
+.ps-n{font-weight:600}.ps-d{font-size:10px;color:var(--t3);margin-top:1px}
+.badge{padding:3px 8px;border-radius:12px;font-size:9px;font-weight:600;font-family:var(--mono);letter-spacing:.3px}
+.ba{background:rgba(0,212,170,.06);color:var(--green)}
+.bap{background:rgba(255,176,32,.06);color:var(--orange)}
+.bn{background:rgba(139,92,246,.06);color:var(--purple)}
+
+.json-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:16px;font-family:var(--mono);font-size:11px;color:var(--green);
+  max-height:350px;overflow:auto;white-space:pre-wrap;word-break:break-all;line-height:1.6}
+
+.tabs{display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--border)}
+.tab{padding:8px 14px;font-size:12px;font-weight:500;color:var(--t3);cursor:pointer;
+  border-bottom:2px solid transparent;transition:.2s;margin-bottom:-1px}
+.tab:hover{color:var(--t2)}.tab.on{color:var(--blue);border-bottom-color:var(--blue)}
+.tp{display:none}.tp.on{display:block}
+
+/* Modal */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;
+  align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.modal-bg.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:36px;
+  max-width:480px;width:90%;text-align:center}
+.modal .ok{width:56px;height:56px;border-radius:50%;background:rgba(0,212,170,.08);
+  border:2px solid var(--green);display:flex;align-items:center;justify-content:center;
+  margin:0 auto 16px;font-size:24px;color:var(--green)}
+.modal h2{font-size:18px;margin-bottom:8px}
+.modal p{color:var(--t2);font-size:12px;line-height:1.5;margin-bottom:16px}
+.modal .url{display:block;background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:10px;font-family:var(--mono);font-size:10px;color:var(--blue);word-break:break-all;margin-bottom:16px}
+.modal .err{color:var(--red);font-size:12px;margin-bottom:14px}
+.spinner{display:none;width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--blue);
+  border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="wrap">
+
+<header>
+  <div class="tag"><div class="dot"></div>PHYSICAL STANDBY · RMAN DUPLICATE</div>
+  <h1>Oracle Standby Builder</h1>
+  <p class="sub">Create Oracle Physical Standby via RMAN Duplicate. Supports Single/RAC, CDB/Non-CDB, ASM/Filesystem, Active/Backup-based duplication.</p>
+</header>
+
+<div class="steps" id="stepper"></div>
+
+<!-- ══════════ STEP 1: Scenario ══════════ -->
+<div class="sec on" data-s="1">
+<div class="cd">
+  <div class="cd-h"><div class="cd-i b">🎯</div><div><div class="cd-t">Scenario Selection</div><div class="cd-s">Pick your environment — this presets recommended options</div></div></div>
+  <div class="gr g2">
+    <div class="fg"><label>Oracle Version</label>
+      <select id="oracle_version"><option value="19c">19c</option><option value="21c">21c</option><option value="23ai">23ai</option><option value="12cR2">12c R2</option><option value="11gR2">11g R2</option></select></div>
+    <div class="fg"><label>Primary Instance Type</label>
+      <select id="primary_db_role"><option value="single">Single Instance</option><option value="rac">RAC</option></select></div>
+    <div class="fg"><label>Standby Instance Type</label>
+      <select id="standby_db_role"><option value="single">Single Instance</option><option value="rac">RAC</option></select></div>
+    <div class="fg"><label>Database Architecture</label>
+      <select id="is_cdb"><option value="false">Non-CDB</option><option value="true">CDB (Multitenant)</option></select></div>
+    <div class="fg"><label>Primary Storage</label>
+      <select id="primary_storage" onchange="togASM('primary')"><option value="asm">ASM</option><option value="filesystem">Filesystem</option></select></div>
+    <div class="fg"><label>Standby Storage</label>
+      <select id="standby_storage" onchange="togASM('standby')"><option value="asm">ASM</option><option value="filesystem">Filesystem</option></select></div>
+    <div class="fg"><label>RMAN Method</label>
+      <select id="rman_method" onchange="togBkp()"><option value="active_duplicate">Active Duplicate (Network)</option><option value="backup_based">Backup-Based Duplicate</option></select></div>
+    <div class="fg"><label>Protection Mode</label>
+      <select id="protection_mode"><option value="MAX_PERFORMANCE">Maximum Performance</option><option value="MAX_AVAILABILITY">Maximum Availability</option><option value="MAX_PROTECTION">Maximum Protection</option></select></div>
+  </div>
+  <div class="note i">ℹ Active Duplicate streams data over network (no pre-existing backup needed). Backup-Based reads from an RMAN backup — ideal for large DBs or slow networks.</div>
+</div>
+<div class="nav"><div></div><button class="btn btn-b" onclick="go(2)">Next →</button></div>
+</div>
+
+<!-- ══════════ STEP 2: Primary DB ══════════ -->
+<div class="sec" data-s="2">
+<div class="cd">
+  <div class="cd-h"><div class="cd-i b">🏛️</div><div><div class="cd-t">Primary Database</div><div class="cd-s">Source database connection and environment</div></div></div>
+  <div class="gr g2">
+    <div class="fg"><label>Hostname / IP <span class="rq">*</span></label><input id="primary_host" placeholder="primary-db.corp.com"></div>
+    <div class="fg"><label>SSH Port</label><input id="primary_ssh_port" value="22"></div>
+    <div class="fg"><label>Oracle SID <span class="rq">*</span></label><input id="primary_sid" placeholder="PRODDB"></div>
+    <div class="fg"><label>DB_UNIQUE_NAME <span class="rq">*</span></label><input id="primary_db_unique_name" placeholder="PRODDB_DC1"></div>
+    <div class="fg"><label>Listener Port</label><input id="primary_listener_port" value="1521"></div>
+    <div class="fg"><label>Oracle Home <span class="rq">*</span></label><input id="primary_oracle_home" placeholder="/u01/app/oracle/product/19c/dbhome_1"></div>
+    <div class="fg"><label>Oracle Base</label><input id="primary_oracle_base" value="/u01/app/oracle"></div>
+    <div class="fg"><label>SSH User</label><input id="primary_ssh_user" value="oracle"></div>
+    <div class="fg"><label>SYS Password <span class="rq">*</span></label><input type="password" id="sys_password" placeholder="Stored as GitHub Secret"></div>
+    <div class="fg"><label>PDB Names (CDB only)</label><input id="pdb_list" placeholder="PDB1,PDB2,PDB3"></div>
+  </div>
+  <div class="divider"></div>
+  <div class="slbl">ASM Configuration</div>
+  <div class="gr g3 asm-primary">
+    <div class="fg"><label>Data DiskGroup</label><input id="primary_asm_data" value="+DATA"></div>
+    <div class="fg"><label>FRA DiskGroup</label><input id="primary_asm_fra" value="+FRA"></div>
+    <div class="fg"><label>Redo DiskGroup</label><input id="primary_asm_redo" placeholder="+REDO (optional)"></div>
+  </div>
+  <div class="gr g2 fs-primary" style="display:none">
+    <div class="fg"><label>Data File Directory</label><input id="primary_data_dir" placeholder="/u01/oradata/PRODDB"></div>
+  </div>
+</div>
+<div class="nav"><button class="btn btn-g" onclick="go(1)">← Back</button><button class="btn btn-b" onclick="go(3)">Next →</button></div>
+</div>
+
+<!-- ══════════ STEP 3: Standby DB ══════════ -->
+<div class="sec" data-s="3">
+<div class="cd">
+  <div class="cd-h"><div class="cd-i g">🔁</div><div><div class="cd-t">Standby Database</div><div class="cd-s">Target server and storage configuration</div></div></div>
+  <div class="gr g2">
+    <div class="fg"><label>Hostname / IP <span class="rq">*</span></label><input id="standby_host" placeholder="standby-db.corp.com"></div>
+    <div class="fg"><label>SSH Port</label><input id="standby_ssh_port" value="22"></div>
+    <div class="fg"><label>Oracle SID <span class="rq">*</span></label><input id="standby_sid" placeholder="STBYDB"></div>
+    <div class="fg"><label>DB_UNIQUE_NAME <span class="rq">*</span></label><input id="standby_db_unique_name" placeholder="PRODDB_DC2"></div>
+    <div class="fg"><label>Listener Port</label><input id="standby_listener_port" value="1521"></div>
+    <div class="fg"><label>Oracle Home <span class="rq">*</span></label><input id="standby_oracle_home" placeholder="/u01/app/oracle/product/19c/dbhome_1"></div>
+    <div class="fg"><label>Oracle Base</label><input id="standby_oracle_base" value="/u01/app/oracle"></div>
+    <div class="fg"><label>SSH User</label><input id="standby_ssh_user" value="oracle"></div>
+  </div>
+  <div class="divider"></div>
+  <div class="slbl">ASM Configuration</div>
+  <div class="gr g3 asm-standby">
+    <div class="fg"><label>Data DiskGroup</label><input id="standby_asm_data" value="+DATA"></div>
+    <div class="fg"><label>FRA DiskGroup</label><input id="standby_asm_fra" value="+FRA"></div>
+    <div class="fg"><label>Redo DiskGroup</label><input id="standby_asm_redo" placeholder="+REDO (optional)"></div>
+  </div>
+  <div class="gr g2 fs-standby" style="display:none">
+    <div class="fg"><label>Data File Directory <span class="rq">*</span></label><input id="standby_data_dir" placeholder="/u01/oradata/STBYDB"></div>
+    <div class="fg"><label>FRA Directory</label><input id="standby_fra_dir" placeholder="/u01/fra/STBYDB"></div>
+  </div>
+</div>
+<div class="nav"><button class="btn btn-g" onclick="go(2)">← Back</button><button class="btn btn-b" onclick="go(4)">Next →</button></div>
+</div>
+
+<!-- ══════════ STEP 4: RMAN ══════════ -->
+<div class="sec" data-s="4">
+<div class="cd">
+  <div class="cd-h"><div class="cd-i o">💾</div><div><div class="cd-t">RMAN Duplicate Settings</div><div class="cd-s">Channels, compression, file name conversion</div></div></div>
+  <div class="gr g2">
+    <div class="fg"><label>Parallelism (Channels)</label>
+      <select id="rman_parallelism"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option></select></div>
+    <div class="fg"><label>Compression</label>
+      <select id="rman_compression"><option value="NONE">None</option><option value="BASIC">Basic</option><option value="LOW">Low (ACO)</option><option value="MEDIUM">Medium (ACO)</option><option value="HIGH">High (ACO)</option></select></div>
+    <div class="fg"><label>Section Size (MB)</label><input id="rman_section_size" placeholder="512 (0 = disabled)"></div>
+    <div class="fg"><label>Redo Transport</label>
+      <select id="redo_transport"><option value="ASYNC">ASYNC</option><option value="SYNC">SYNC</option><option value="FASTSYNC">FASTSYNC</option></select></div>
+  </div>
+  <div class="gr g2 bkp-fields" style="display:none">
+    <div class="fg"><label>Backup Location <span class="rq">*</span></label><input id="rman_backup_location" placeholder="/backup/rman/PRODDB"></div>
+    <div class="fg"><label>Backup Tag</label><input id="rman_backup_tag" placeholder="FOR_STANDBY"></div>
+  </div>
+  <div class="divider"></div>
+  <div class="slbl">File Name Conversion</div>
+  <div class="gr g2">
+    <div class="fg fw"><label>DB_FILE_NAME_CONVERT</label><input id="db_file_name_convert" placeholder="'/u01/primary','/u01/standby' or '+DATA/PRODDB','+DATA/STBYDB'"></div>
+    <div class="fg fw"><label>LOG_FILE_NAME_CONVERT</label><input id="log_file_name_convert" placeholder="'/u01/primary/redo','/u01/standby/redo'"></div>
+    <div class="fg fw"><label>Additional RMAN Commands</label><textarea id="rman_additional" rows="2" placeholder="SET NEWNAME... or SET UNTIL SCN..."></textarea></div>
+  </div>
+  <div class="gr g2" style="margin-top:10px">
+    <div class="fg"><label>Standby Redo Log Groups</label><input id="standby_redo_groups" value="4"></div>
+    <div class="fg"><label>Standby Redo Size (MB)</label><input id="standby_redo_size" value="200"></div>
+    <div class="fg"><label>Net Timeout (sec)</label><input id="net_timeout" value="30"></div>
+    <div class="chk"><input type="checkbox" id="nofilenamecheck" checked><label for="nofilenamecheck">NOFILENAMECHECK</label></div>
+  </div>
+</div>
+<div class="nav"><button class="btn btn-g" onclick="go(3)">← Back</button><button class="btn btn-b" onclick="go(5)">Next →</button></div>
+</div>
+
+<!-- ══════════ STEP 5: Options ══════════ -->
+<div class="sec" data-s="5">
+<div class="cd">
+  <div class="cd-h"><div class="cd-i p">⚙️</div><div><div class="cd-t">Options & Notifications</div><div class="cd-s">Features, email alerts, approval gates</div></div></div>
+  <div class="gr g2">
+    <div>
+      <div class="slbl">Database Options</div>
+      <div class="chk"><input type="checkbox" id="force_logging" checked><label for="force_logging">Force Logging</label></div>
+      <div class="chk"><input type="checkbox" id="flashback" checked><label for="flashback">Flashback Database</label></div>
+      <div class="chk"><input type="checkbox" id="archivelog_check" checked><label for="archivelog_check">Verify Archive Log Mode</label></div>
+      <div class="chk"><input type="checkbox" id="standby_file_mgmt" checked><label for="standby_file_mgmt">STANDBY_FILE_MANAGEMENT=AUTO</label></div>
+      <div class="chk"><input type="checkbox" id="start_mrp" checked><label for="start_mrp">Start MRP After Creation</label></div>
+      <div class="chk"><input type="checkbox" id="open_readonly"><label for="open_readonly">Open READ ONLY</label></div>
+      <div class="chk"><input type="checkbox" id="real_time_apply"><label for="real_time_apply">Real-Time Apply</label></div>
+    </div>
+    <div>
+      <div class="slbl">Approval Gates</div>
+      <div class="chk"><input type="checkbox" id="gate_precheck" checked><label for="gate_precheck">Gate 1: Pre-Flight Approval</label></div>
+      <div class="chk"><input type="checkbox" id="gate_primary" checked><label for="gate_primary">Gate 2: Primary Changes</label></div>
+      <div class="chk"><input type="checkbox" id="gate_rman" checked><label for="gate_rman">Gate 3: RMAN Duplicate Start</label></div>
+      <div class="chk"><input type="checkbox" id="gate_golive" checked><label for="gate_golive">Gate 4: Go-Live</label></div>
+    </div>
+  </div>
+  <div class="divider"></div>
+  <div class="slbl">Notifications</div>
+  <div class="gr g2">
+    <div class="fg fw"><label>Email Recipients (comma-sep)</label><input id="email_to" placeholder="dba@corp.com, oncall@corp.com"></div>
+    <div class="fg"><label>SMTP Server</label><input id="smtp_server" placeholder="smtp.corp.com"></div>
+    <div class="fg"><label>Slack Webhook</label><input id="slack_webhook" placeholder="https://hooks.slack.com/..."></div>
+  </div>
+</div>
+<div class="nav"><button class="btn btn-g" onclick="go(4)">← Back</button><button class="btn btn-b" onclick="go(6)">Review →</button></div>
+</div>
+
+<!-- ══════════ STEP 6: Review ══════════ -->
+<div class="sec" data-s="6">
+<div class="cd">
+  <div class="cd-h"><div class="cd-i b">🚀</div><div><div class="cd-t">Pipeline Execution Plan</div><div class="cd-s">GitHub Actions orchestrates → Ansible executes each stage on target servers</div></div></div>
+  <div class="pipe" id="pipeView"></div>
+</div>
+<div class="cd">
+  <div class="cd-h"><div class="cd-i g">📋</div><div><div class="cd-t">Configuration</div><div class="cd-s">Payload sent to GitHub Actions → forwarded to Ansible as extra_vars</div></div></div>
+  <div class="tabs"><div class="tab on" onclick="stab('t1',this)">JSON</div><div class="tab" onclick="stab('t2',this)">Ansible Inventory</div><div class="tab" onclick="stab('t3',this)">TNS Preview</div></div>
+  <div class="tp on" id="t1"><div class="json-box" id="jOut"></div></div>
+  <div class="tp" id="t2"><div class="json-box" id="iOut"></div></div>
+  <div class="tp" id="t3"><div class="json-box" id="tOut"></div></div>
+</div>
+<div class="nav"><button class="btn btn-g" onclick="go(5)">← Back</button><button class="btn btn-go" onclick="deploy()" id="deployBtn">🚀 Deploy Standby</button></div>
+</div>
+
+<!-- Modal -->
+<div class="modal-bg" id="modal">
+  <div class="modal">
+    <div class="spinner" id="spin"></div>
+    <div class="ok" id="okIco" style="display:none">✓</div>
+    <h2 id="mTitle">Deploying...</h2>
+    <p id="mMsg">Triggering GitHub Actions pipeline...</p>
+    <div class="err" id="mErr" style="display:none"></div>
+    <div class="url" id="mUrl" style="display:none"></div>
+    <button class="btn btn-b" id="mClose" style="display:none" onclick="document.getElementById('modal').classList.remove('show')">Close</button>
+  </div>
+</div>
+
+<script>
+const STP=[{n:1,l:'Scenario'},{n:2,l:'Primary'},{n:3,l:'Standby'},{n:4,l:'RMAN'},{n:5,l:'Options'},{n:6,l:'Review'}];
+const stepEl=document.getElementById('stepper');
+STP.forEach((s,i)=>{
+  if(i)stepEl.innerHTML+='<span class="sarr">▸</span>';
+  stepEl.innerHTML+=`<div class="st ${i===0?'on':''}" data-st="${s.n}" onclick="go(${s.n})"><div class="sn">${s.n}</div><span>${s.l}</span></div>`;
+});
+
+function go(n){
+  document.querySelectorAll('.sec').forEach(s=>s.classList.remove('on'));
+  document.querySelectorAll('.st').forEach(s=>{const x=+s.dataset.st;s.classList.remove('on');x<n?s.classList.add('ok'):s.classList.remove('ok')});
+  document.querySelector(`[data-s="${n}"]`).classList.add('on');
+  document.querySelector(`[data-st="${n}"]`).classList.add('on');
+  if(n===6)buildReview();
+  scrollTo({top:0,behavior:'smooth'});
+}
+
+function togASM(prefix){
+  const v=V(prefix+'_storage');
+  const isASM=v==='asm';
+  document.querySelectorAll('.asm-'+prefix).forEach(e=>e.style.display=isASM?'':'none');
+  document.querySelectorAll('.fs-'+prefix).forEach(e=>e.style.display=isASM?'none':'');
+}
+function togBkp(){
+  const m=V('rman_method');
+  document.querySelectorAll('.bkp-fields').forEach(e=>e.style.display=m.includes('backup')?'':'none');
+}
+
+function V(id){return document.getElementById(id)?.value?.trim()||''}
+function C(id){return document.getElementById(id)?.checked||false}
+
+function getAllData(){
+  const fields=['oracle_version','primary_db_role','standby_db_role','is_cdb','primary_storage','standby_storage',
+    'rman_method','protection_mode','primary_host','primary_ssh_port','primary_sid','primary_db_unique_name',
+    'primary_listener_port','primary_oracle_home','primary_oracle_base','primary_ssh_user','sys_password',
+    'pdb_list','primary_asm_data','primary_asm_fra','primary_asm_redo','primary_data_dir',
+    'standby_host','standby_ssh_port','standby_sid','standby_db_unique_name','standby_listener_port',
+    'standby_oracle_home','standby_oracle_base','standby_ssh_user','standby_asm_data','standby_asm_fra',
+    'standby_asm_redo','standby_data_dir','standby_fra_dir',
+    'rman_parallelism','rman_compression','rman_section_size','redo_transport','rman_backup_location',
+    'rman_backup_tag','db_file_name_convert','log_file_name_convert','rman_additional',
+    'standby_redo_groups','standby_redo_size','net_timeout',
+    'email_to','smtp_server','slack_webhook'];
+  const checks=['nofilenamecheck','force_logging','flashback','archivelog_check','standby_file_mgmt',
+    'start_mrp','open_readonly','real_time_apply','gate_precheck','gate_primary','gate_rman','gate_golive'];
+  const d={};
+  fields.forEach(f=>d[f]=V(f));
+  checks.forEach(c=>d[c]=C(c));
+  d.is_cdb=d.is_cdb==='true';
+  return d;
+}
+
+function stab(id,el){
+  el.closest('.cd').querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
+  el.classList.add('on');
+  el.closest('.cd').querySelectorAll('.tp').forEach(t=>t.classList.remove('on'));
+  document.getElementById(id).classList.add('on');
+}
+
+function buildReview(){
+  const d=getAllData();
+  document.getElementById('jOut').textContent=JSON.stringify(d,null,2);
+
+  // Inventory
+  document.getElementById('iOut').textContent=
+`[primary]
+${d.primary_host} ansible_port=${d.primary_ssh_port} ansible_user=${d.primary_ssh_user}
+
+[standby]
+${d.standby_host} ansible_port=${d.standby_ssh_port} ansible_user=${d.standby_ssh_user}
+
+[oracle:children]
+primary
+standby
+
+[oracle:vars]
+oracle_version=${d.oracle_version}
+oracle_home=${d.primary_oracle_home}
+oracle_base=${d.primary_oracle_base}
+primary_sid=${d.primary_sid}
+primary_db_unique_name=${d.primary_db_unique_name}
+standby_sid=${d.standby_sid}
+standby_db_unique_name=${d.standby_db_unique_name}
+rman_method=${d.rman_method}
+rman_parallelism=${d.rman_parallelism}
+protection_mode=${d.protection_mode}`;
+
+  // TNS
+  document.getElementById('tOut').textContent=
+`# tnsnames.ora - Add to BOTH primary and standby
+
+${d.primary_db_unique_name} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = ${d.primary_host})(PORT = ${d.primary_listener_port}))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = ${d.primary_db_unique_name})))
+
+${d.standby_db_unique_name} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = ${d.standby_host})(PORT = ${d.standby_listener_port}))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = ${d.standby_db_unique_name})
+      (STATIC_SERVICE = TRUE)))`;
+
+  // Pipeline steps
+  const steps=[
+    {i:'🔍',n:'Pre-Flight Checks',ds:'SSH, Oracle Home, space, archivelog, version',b:d.gate_precheck?'bap':'ba',bt:d.gate_precheck?'APPROVAL':'AUTO'},
+    {i:'📧',n:'Notify: Pre-Checks',ds:'Email/Slack pre-check results',b:'bn',bt:'NOTIFY'},
+    {i:'⚙️',n:'Configure Primary',ds:'Force logging, SRL, DG params, password file',b:d.gate_primary?'bap':'ba',bt:d.gate_primary?'APPROVAL':'AUTO'},
+    {i:'📧',n:'Notify: Primary Done',ds:'Confirm primary changes',b:'bn',bt:'NOTIFY'},
+    {i:'🏗️',n:'Prepare Standby',ds:'Dirs, init.ora, orapwd, TNS, static listener, NOMOUNT',b:'ba',bt:'AUTO'},
+    {i:'💾',n:'RMAN Duplicate',ds:`${d.rman_method.replace(/_/g,' ')} · ${d.rman_parallelism}ch · ${d.rman_compression}`,b:d.gate_rman?'bap':'ba',bt:d.gate_rman?'APPROVAL':'AUTO'},
+    {i:'📧',n:'Notify: RMAN Done',ds:'RMAN result + duration',b:'bn',bt:'NOTIFY'},
+    {i:'⚙️',n:'Post-Duplicate Config',ds:'Temp files, DG params, protection mode',b:'ba',bt:'AUTO'},
+  ];
+  if(d.start_mrp) steps.push({i:'▶️',n:'Start MRP',ds:d.open_readonly?'MRP + READ ONLY':'Managed Recovery',b:'ba',bt:'AUTO'});
+  steps.push({i:'✅',n:'Validation',ds:'Sync, gap, switchover check, v$dataguard_status',b:d.gate_golive?'bap':'ba',bt:d.gate_golive?'APPROVAL':'AUTO'});
+  steps.push({i:'📧',n:'Final Report',ds:'Complete status to all recipients',b:'bn',bt:'NOTIFY'});
+
+  document.getElementById('pipeView').innerHTML=steps.map((s,i)=>`
+    <div class="ps">
+      <div class="ps-i" style="background:${s.b==='bap'?'rgba(255,176,32,.06)':s.b==='bn'?'rgba(139,92,246,.06)':'rgba(0,212,170,.04)'}">${s.i}</div>
+      <div class="ps-info"><div class="ps-n">${i+1}. ${s.n}</div><div class="ps-d">${s.ds}</div></div>
+      <div class="badge ${s.b}">${s.bt}</div>
+    </div>`).join('');
+}
+
+async function deploy(){
+  const d=getAllData();
+  // Validate
+  const req={primary_host:'Primary Host',primary_sid:'Primary SID',primary_db_unique_name:'Primary DB Unique Name',
+    primary_oracle_home:'Primary Oracle Home',standby_host:'Standby Host',standby_sid:'Standby SID',
+    standby_db_unique_name:'Standby DB Unique Name',standby_oracle_home:'Standby Oracle Home'};
+  for(const[k,v] of Object.entries(req)){if(!d[k]){alert('Required: '+v);return}}
+  if(d.primary_db_unique_name===d.standby_db_unique_name){alert('DB_UNIQUE_NAME must differ');return}
+
+  // Show modal
+  const m=document.getElementById('modal');
+  m.classList.add('show');
+  document.getElementById('spin').style.display='block';
+  document.getElementById('okIco').style.display='none';
+  document.getElementById('mTitle').textContent='Deploying...';
+  document.getElementById('mMsg').textContent='Triggering GitHub Actions pipeline...';
+  document.getElementById('mErr').style.display='none';
+  document.getElementById('mUrl').style.display='none';
+  document.getElementById('mClose').style.display='none';
+
+  try{
+    const resp=await fetch('/api/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+    const result=await resp.json();
+    document.getElementById('spin').style.display='none';
+    if(result.success){
+      document.getElementById('okIco').style.display='flex';
+      document.getElementById('mTitle').textContent='Pipeline Triggered!';
+      document.getElementById('mMsg').textContent='Ansible playbooks will execute at each stage. Check your email for notifications.';
+      document.getElementById('mUrl').textContent=result.run_url;
+      document.getElementById('mUrl').style.display='block';
+    }else{
+      document.getElementById('mTitle').textContent='Error';
+      document.getElementById('mErr').textContent=result.error;
+      document.getElementById('mErr').style.display='block';
+    }
+    document.getElementById('mClose').style.display='inline-flex';
+  }catch(e){
+    document.getElementById('spin').style.display='none';
+    document.getElementById('mTitle').textContent='Error';
+    document.getElementById('mErr').textContent=e.message;
+    document.getElementById('mErr').style.display='block';
+    document.getElementById('mClose').style.display='inline-flex';
+  }
+}
+
+togASM('primary');togASM('standby');togBkp();
+</script>
+</body>
+</html>
