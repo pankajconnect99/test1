@@ -1,0 +1,371 @@
+###############################################################################
+# Oracle Physical Standby Creation Pipeline
+# GitHub Actions → Ansible Playbooks (via self-hosted runner on Ansible control node)
+###############################################################################
+name: "Oracle Physical Standby Creation"
+
+on:
+  repository_dispatch:
+    types: [create-physical-standby]
+
+env:
+  PIPELINE_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # INIT: Parse config from dispatch payload
+  # ═══════════════════════════════════════════════════════════════════════════
+  init:
+    name: "📋 Initialize"
+    runs-on: ubuntu-latest
+    outputs:
+      primary_host: ${{ steps.p.outputs.primary_host }}
+      primary_sid: ${{ steps.p.outputs.primary_sid }}
+      standby_host: ${{ steps.p.outputs.standby_host }}
+      standby_sid: ${{ steps.p.outputs.standby_sid }}
+      rman_method: ${{ steps.p.outputs.rman_method }}
+      email_to: ${{ steps.p.outputs.email_to }}
+      start_mrp: ${{ steps.p.outputs.start_mrp }}
+      ap1: ${{ steps.p.outputs.ap1 }}
+      ap2: ${{ steps.p.outputs.ap2 }}
+      ap3: ${{ steps.p.outputs.ap3 }}
+      ap4: ${{ steps.p.outputs.ap4 }}
+    steps:
+      - name: Parse
+        id: p
+        run: |
+          P='${{ toJson(github.event.client_payload) }}'
+          echo "primary_host=$(echo $P|jq -r '.primary.host')" >> $GITHUB_OUTPUT
+          echo "primary_sid=$(echo $P|jq -r '.primary.sid')" >> $GITHUB_OUTPUT
+          echo "standby_host=$(echo $P|jq -r '.standby.host')" >> $GITHUB_OUTPUT
+          echo "standby_sid=$(echo $P|jq -r '.standby.sid')" >> $GITHUB_OUTPUT
+          echo "rman_method=$(echo $P|jq -r '.rman.method')" >> $GITHUB_OUTPUT
+          echo "email_to=$(echo $P|jq -r '.notifications.email_to')" >> $GITHUB_OUTPUT
+          echo "start_mrp=$(echo $P|jq -r '.options.start_mrp')" >> $GITHUB_OUTPUT
+          echo "ap1=$(echo $P|jq -r '.approvals.gate_precheck')" >> $GITHUB_OUTPUT
+          echo "ap2=$(echo $P|jq -r '.approvals.gate_primary')" >> $GITHUB_OUTPUT
+          echo "ap3=$(echo $P|jq -r '.approvals.gate_rman')" >> $GITHUB_OUTPUT
+          echo "ap4=$(echo $P|jq -r '.approvals.gate_golive')" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        run: |
+          echo "Primary: ${{ steps.p.outputs.primary_host }}/${{ steps.p.outputs.primary_sid }}"
+          echo "Standby: ${{ steps.p.outputs.standby_host }}/${{ steps.p.outputs.standby_sid }}"
+          echo "Method:  ${{ steps.p.outputs.rman_method }}"
+
+      # Save config to artifact for Ansible jobs to pick up
+      - name: Save Config Artifact
+        run: echo '${{ toJson(github.event.client_payload) }}' > config.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standby-config
+          path: config.json
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 1: Pre-Flight Checks
+  # ═══════════════════════════════════════════════════════════════════════════
+  preflight:
+    name: "🔍 Pre-Flight Checks"
+    needs: init
+    runs-on: [self-hosted, ansible]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: standby-config }
+
+      - name: Run Ansible Pre-Flight
+        run: |
+          cd ansible
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/01_preflight.yml \
+            -e "@../config.json" \
+            -e "ansible_ssh_private_key_file=${{ secrets.SSH_PRIVATE_KEY_PATH }}" \
+            -e "oracle_sys_password=${{ secrets.ORACLE_SYS_PASSWORD }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # NOTIFY: Pre-Flight
+  # ═══════════════════════════════════════════════════════════════════════════
+  notify_preflight:
+    name: "📧 Notify Pre-Flight"
+    needs: [init, preflight]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Send Email
+        uses: dawidd6/action-send-mail@v3
+        if: needs.init.outputs.email_to != ''
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ needs.preflight.result == 'success' && '✅' || '❌' }}] Standby Pre-Flight - ${{ needs.init.outputs.primary_sid }} → ${{ needs.init.outputs.standby_sid }}"
+          to: ${{ needs.init.outputs.email_to }}
+          from: ${{ secrets.SMTP_FROM }}
+          body: |
+            Oracle Physical Standby Creation Pipeline
+            ============================================
+            Stage: Pre-Flight Checks
+            Status: ${{ needs.preflight.result }}
+            Primary: ${{ needs.init.outputs.primary_host }}/${{ needs.init.outputs.primary_sid }}
+            Standby: ${{ needs.init.outputs.standby_host }}/${{ needs.init.outputs.standby_sid }}
+            Pipeline: ${{ env.PIPELINE_URL }}
+
+      - name: Slack Notification
+        if: secrets.SLACK_WEBHOOK != ''
+        run: |
+          curl -X POST "${{ secrets.SLACK_WEBHOOK }}" \
+            -H 'Content-type: application/json' \
+            -d '{"text":"Pre-Flight ${{ needs.preflight.result }}: ${{ needs.init.outputs.primary_sid }} → ${{ needs.init.outputs.standby_sid }}\n${{ env.PIPELINE_URL }}"}'
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 1: Approve Pre-Flight
+  # ═══════════════════════════════════════════════════════════════════════════
+  gate1:
+    name: "🔐 Gate 1: Pre-Flight"
+    needs: [init, preflight, notify_preflight]
+    if: needs.init.outputs.ap1 == 'true' && needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    environment: preflight-approval
+    steps:
+      - run: echo "✅ Approved"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 2: Configure Primary
+  # ═══════════════════════════════════════════════════════════════════════════
+  configure_primary:
+    name: "⚙️ Configure Primary"
+    needs: [init, preflight, gate1]
+    if: always() && needs.preflight.result == 'success' && (needs.gate1.result == 'success' || needs.init.outputs.ap1 != 'true')
+    runs-on: [self-hosted, ansible]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: standby-config }
+
+      - name: Run Ansible Configure Primary
+        run: |
+          cd ansible
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/02_configure_primary.yml \
+            -e "@../config.json" \
+            -e "oracle_sys_password=${{ secrets.ORACLE_SYS_PASSWORD }}"
+
+  notify_primary:
+    name: "📧 Notify Primary"
+    needs: [init, configure_primary]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Send Email
+        uses: dawidd6/action-send-mail@v3
+        if: needs.init.outputs.email_to != ''
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ needs.configure_primary.result == 'success' && '✅' || '❌' }}] Primary Configured - ${{ needs.init.outputs.primary_sid }}"
+          to: ${{ needs.init.outputs.email_to }}
+          from: ${{ secrets.SMTP_FROM }}
+          body: |
+            Stage: Configure Primary Database
+            Status: ${{ needs.configure_primary.result }}
+            Pipeline: ${{ env.PIPELINE_URL }}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 2: Approve Primary Changes
+  # ═══════════════════════════════════════════════════════════════════════════
+  gate2:
+    name: "🔐 Gate 2: Primary Changes"
+    needs: [init, configure_primary, notify_primary]
+    if: needs.init.outputs.ap2 == 'true' && needs.configure_primary.result == 'success'
+    runs-on: ubuntu-latest
+    environment: primary-approval
+    steps:
+      - run: echo "✅ Approved"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 3: Prepare Standby + NOMOUNT
+  # ═══════════════════════════════════════════════════════════════════════════
+  prepare_standby:
+    name: "🏗️ Prepare Standby & NOMOUNT"
+    needs: [init, configure_primary, gate2]
+    if: always() && needs.configure_primary.result == 'success' && (needs.gate2.result == 'success' || needs.init.outputs.ap2 != 'true')
+    runs-on: [self-hosted, ansible]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: standby-config }
+
+      - name: Run Ansible Prepare Standby
+        run: |
+          cd ansible
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/03_prepare_standby.yml \
+            -e "@../config.json" \
+            -e "oracle_sys_password=${{ secrets.ORACLE_SYS_PASSWORD }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 3: Approve RMAN
+  # ═══════════════════════════════════════════════════════════════════════════
+  gate3:
+    name: "🔐 Gate 3: RMAN Duplicate"
+    needs: [init, prepare_standby]
+    if: needs.init.outputs.ap3 == 'true' && needs.prepare_standby.result == 'success'
+    runs-on: ubuntu-latest
+    environment: rman-approval
+    steps:
+      - run: echo "✅ Approved"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 4: RMAN Duplicate
+  # ═══════════════════════════════════════════════════════════════════════════
+  rman_duplicate:
+    name: "💾 RMAN Duplicate"
+    needs: [init, prepare_standby, gate3]
+    if: always() && needs.prepare_standby.result == 'success' && (needs.gate3.result == 'success' || needs.init.outputs.ap3 != 'true')
+    runs-on: [self-hosted, ansible]
+    timeout-minutes: 1440
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: standby-config }
+
+      - name: Run Ansible RMAN Duplicate
+        run: |
+          cd ansible
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/04_rman_duplicate.yml \
+            -e "@../config.json" \
+            -e "oracle_sys_password=${{ secrets.ORACLE_SYS_PASSWORD }}"
+
+  notify_rman:
+    name: "📧 Notify RMAN"
+    needs: [init, rman_duplicate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Send Email
+        uses: dawidd6/action-send-mail@v3
+        if: needs.init.outputs.email_to != ''
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ needs.rman_duplicate.result == 'success' && '✅' || '❌' }}] RMAN Duplicate ${{ needs.rman_duplicate.result }} - ${{ needs.init.outputs.standby_sid }}"
+          to: ${{ needs.init.outputs.email_to }}
+          from: ${{ secrets.SMTP_FROM }}
+          body: |
+            Stage: RMAN Duplicate (${{ needs.init.outputs.rman_method }})
+            Status: ${{ needs.rman_duplicate.result }}
+            Standby: ${{ needs.init.outputs.standby_host }}/${{ needs.init.outputs.standby_sid }}
+            Pipeline: ${{ env.PIPELINE_URL }}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 5: Post-Config + Start MRP
+  # ═══════════════════════════════════════════════════════════════════════════
+  post_config:
+    name: "⚙️ Post Config & Start MRP"
+    needs: [init, rman_duplicate]
+    if: needs.rman_duplicate.result == 'success'
+    runs-on: [self-hosted, ansible]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: standby-config }
+
+      - name: Run Ansible Post Config
+        run: |
+          cd ansible
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/05_post_config.yml \
+            -e "@../config.json" \
+            -e "oracle_sys_password=${{ secrets.ORACLE_SYS_PASSWORD }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GATE 4: Go-Live
+  # ═══════════════════════════════════════════════════════════════════════════
+  gate4:
+    name: "🔐 Gate 4: Go-Live"
+    needs: [init, post_config]
+    if: needs.init.outputs.ap4 == 'true' && needs.post_config.result == 'success'
+    runs-on: ubuntu-latest
+    environment: golive-approval
+    steps:
+      - run: echo "✅ Approved"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 6: Validation
+  # ═══════════════════════════════════════════════════════════════════════════
+  validation:
+    name: "✅ Validation"
+    needs: [init, post_config, gate4]
+    if: always() && needs.post_config.result == 'success' && (needs.gate4.result == 'success' || needs.init.outputs.ap4 != 'true')
+    runs-on: [self-hosted, ansible]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: standby-config }
+
+      - name: Run Ansible Validation
+        run: |
+          cd ansible
+          ansible-playbook -i inventory/hosts.yml \
+            playbooks/06_validation.yml \
+            -e "@../config.json" \
+            -e "oracle_sys_password=${{ secrets.ORACLE_SYS_PASSWORD }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FINAL NOTIFICATION
+  # ═══════════════════════════════════════════════════════════════════════════
+  notify_final:
+    name: "📧 Final Report"
+    needs: [init, preflight, configure_primary, prepare_standby, rman_duplicate, post_config, validation]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Final Email
+        uses: dawidd6/action-send-mail@v3
+        if: needs.init.outputs.email_to != ''
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[${{ needs.validation.result == 'success' && '✅ SUCCESS' || '❌ FAILED' }}] Standby Creation Complete - ${{ needs.init.outputs.standby_sid }}"
+          to: ${{ needs.init.outputs.email_to }}
+          from: ${{ secrets.SMTP_FROM }}
+          body: |
+            ═══════════════════════════════════════
+            ORACLE PHYSICAL STANDBY - FINAL REPORT
+            ═══════════════════════════════════════
+
+            Primary:   ${{ needs.init.outputs.primary_host }}/${{ needs.init.outputs.primary_sid }}
+            Standby:   ${{ needs.init.outputs.standby_host }}/${{ needs.init.outputs.standby_sid }}
+            Method:    ${{ needs.init.outputs.rman_method }}
+
+            STAGE RESULTS:
+            ─────────────────────────────────────
+            Pre-Flight:      ${{ needs.preflight.result }}
+            Primary Config:  ${{ needs.configure_primary.result }}
+            Prepare Standby: ${{ needs.prepare_standby.result }}
+            RMAN Duplicate:  ${{ needs.rman_duplicate.result }}
+            Post Config:     ${{ needs.post_config.result }}
+            Validation:      ${{ needs.validation.result }}
+            ─────────────────────────────────────
+
+            Pipeline: ${{ env.PIPELINE_URL }}
+
+      - name: Slack Final
+        if: secrets.SLACK_WEBHOOK != ''
+        run: |
+          STATUS="${{ needs.validation.result == 'success' && '✅ SUCCESS' || '❌ FAILED' }}"
+          curl -X POST "${{ secrets.SLACK_WEBHOOK }}" \
+            -H 'Content-type: application/json' \
+            -d "{\"text\":\"${STATUS}: Standby ${{ needs.init.outputs.standby_sid }} creation complete\nPrimary: ${{ needs.init.outputs.primary_sid }}\nPipeline: ${{ env.PIPELINE_URL }}\"}"

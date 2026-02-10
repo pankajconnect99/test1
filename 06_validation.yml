@@ -1,0 +1,152 @@
+---
+# ansible/playbooks/06_validation.yml
+# Full validation of standby database
+- name: "Validate Standby on Primary Side"
+  hosts: primary
+  gather_facts: no
+  become: yes
+  become_user: "{{ primary.ssh_user | default('oracle') }}"
+  vars:
+    oh: "{{ primary.oracle_home }}"
+    sid: "{{ primary.sid }}"
+  tasks:
+
+    - name: Force log switch on primary
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER SYSTEM ARCHIVE LOG CURRENT;
+        ALTER SYSTEM ARCHIVE LOG CURRENT;
+        ALTER SYSTEM ARCHIVE LOG CURRENT;
+        SQL
+
+    - name: Check archive log destination status
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT DEST_NAME, STATUS, ERROR FROM V\$ARCHIVE_DEST WHERE DEST_ID IN (1,2);" | sqlplus -s / as sysdba
+      register: dest_status
+      changed_when: false
+
+    - name: Display dest status
+      debug:
+        msg: "{{ dest_status.stdout }}"
+
+    - name: Check for archive gap on primary
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT * FROM V\$ARCHIVE_GAP;" | sqlplus -s / as sysdba
+      register: gap_check
+      changed_when: false
+
+    - name: Display gap check
+      debug:
+        msg: "{{ gap_check.stdout }}"
+
+- name: "Validate Standby Database"
+  hosts: standby
+  gather_facts: no
+  become: yes
+  become_user: "{{ standby.ssh_user | default('oracle') }}"
+  vars:
+    oh: "{{ standby.oracle_home }}"
+    sid: "{{ standby.sid }}"
+  tasks:
+
+    - name: Wait for redo apply to catch up
+      pause:
+        seconds: 30
+
+    - name: Check database role
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT DATABASE_ROLE, OPEN_MODE, PROTECTION_MODE, SWITCHOVER_STATUS FROM V\$DATABASE;" | sqlplus -s / as sysdba
+      register: db_info
+      changed_when: false
+
+    - name: Display database info
+      debug:
+        msg: "{{ db_info.stdout }}"
+
+    - name: Verify PHYSICAL STANDBY role
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT DATABASE_ROLE FROM V\$DATABASE;" | sqlplus -s / as sysdba
+      register: role_check
+      changed_when: false
+      failed_when: "'PHYSICAL STANDBY' not in role_check.stdout"
+
+    - name: Check MRP process
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT PROCESS, STATUS, THREAD#, SEQUENCE#, BLOCK# FROM V\$MANAGED_STANDBY WHERE PROCESS LIKE 'MRP%' OR PROCESS LIKE 'RFS%';" | sqlplus -s / as sysdba
+      register: mrp_status
+      changed_when: false
+
+    - name: Display MRP/RFS status
+      debug:
+        msg: "{{ mrp_status.stdout }}"
+
+    - name: Check applied sequence
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT THREAD#, MAX(SEQUENCE#) AS LAST_APPLIED FROM V\$ARCHIVED_LOG WHERE APPLIED='YES' GROUP BY THREAD#;" | sqlplus -s / as sysdba
+      register: applied_seq
+      changed_when: false
+
+    - name: Display applied sequences
+      debug:
+        msg: "{{ applied_seq.stdout }}"
+
+    - name: Check archive gap on standby
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT * FROM V\$ARCHIVE_GAP;" | sqlplus -s / as sysdba
+      register: stby_gap
+      changed_when: false
+
+    - name: Check Data Guard status
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT SEVERITY, ERROR_CODE, MESSAGE FROM V\$DATAGUARD_STATUS WHERE TIMESTAMP > SYSDATE - 1/24 ORDER BY TIMESTAMP DESC;" | sqlplus -s / as sysdba
+      register: dg_status
+      changed_when: false
+
+    - name: Display DG status
+      debug:
+        msg: "{{ dg_status.stdout }}"
+
+    - name: Check switchover status
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT SWITCHOVER_STATUS FROM V\$DATABASE;" | sqlplus -s / as sysdba
+      register: switchover
+      changed_when: false
+
+    - name: Display switchover status
+      debug:
+        msg: "{{ switchover.stdout }}"
+
+    - name: Check PDB status (CDB only)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT CON_ID, NAME, OPEN_MODE FROM V\$PDBS ORDER BY CON_ID;" | sqlplus -s / as sysdba
+      register: pdb_status
+      changed_when: false
+      when: primary.is_cdb | default(false) | bool
+
+    - name: Display PDB status
+      debug:
+        msg: "{{ pdb_status.stdout }}"
+      when: pdb_status is defined and pdb_status.stdout is defined
+
+    - name: Final validation summary
+      debug:
+        msg: |
+          ══════════════════════════════════════════
+          STANDBY DATABASE VALIDATION COMPLETE
+          ══════════════════════════════════════════
+          Database Role: PHYSICAL STANDBY ✅
+          MRP Running:   {{ 'YES ✅' if 'APPLYING' in mrp_status.stdout else 'CHECK ⚠️' }}
+          Archive Gap:   {{ 'NONE ✅' if stby_gap.stdout | trim | length < 20 else 'GAP DETECTED ⚠️' }}
+          Switchover:    {{ switchover.stdout_lines | select('match', '.*NOT ALLOWED.*|.*SESSIONS ACTIVE.*|.*TO PRIMARY.*') | first | default('CHECK MANUALLY') }}
+          ══════════════════════════════════════════

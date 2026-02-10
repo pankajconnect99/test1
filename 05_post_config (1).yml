@@ -1,0 +1,135 @@
+---
+# ansible/playbooks/05_post_config.yml
+# Post-duplicate configuration: temp files, params, MRP, PDB open
+- name: "Post-Duplicate Configuration"
+  hosts: standby
+  gather_facts: yes
+  become: yes
+  become_user: "{{ standby.ssh_user | default('oracle') }}"
+  vars:
+    oh: "{{ standby.oracle_home }}"
+    sid: "{{ standby.sid }}"
+    p_uniq: "{{ primary.db_unique_name }}"
+    s_uniq: "{{ standby.db_unique_name }}"
+    is_cdb: "{{ primary.is_cdb | default(false) | bool }}"
+
+  tasks:
+
+    - name: Create server parameter file from pfile
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        CREATE SPFILE FROM PFILE='{{ oh }}/dbs/init{{ sid }}.ora';
+        SQL
+      ignore_errors: yes
+
+    - name: Add temp files to standby
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        -- Add temp tablespace file (standby needs this explicitly)
+        ALTER TABLESPACE TEMP ADD TEMPFILE SIZE 1G AUTOEXTEND ON;
+        SQL
+      ignore_errors: yes
+
+    - name: Set standby Data Guard parameters
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ p_uniq }},{{ s_uniq }})' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ s_uniq }}' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE={{ p_uniq }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ p_uniq }}' SCOPE=BOTH;
+        ALTER SYSTEM SET FAL_SERVER='{{ p_uniq }}' SCOPE=BOTH;
+        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
+        SQL
+
+    - name: Set protection mode on primary
+      shell: |
+        export ORACLE_HOME={{ primary.oracle_home }} ORACLE_SID={{ primary.sid }} PATH={{ primary.oracle_home }}/bin:$PATH
+        ssh {{ primary.ssh_user | default('oracle') }}@{{ primary.host }} "
+          export ORACLE_HOME={{ primary.oracle_home }} ORACLE_SID={{ primary.sid }} PATH={{ primary.oracle_home }}/bin:\$PATH
+          sqlplus -s / as sysdba <<< 'ALTER DATABASE SET STANDBY DATABASE TO MAXIMIZE {{ options.protection_mode | default(\"PERFORMANCE\") | replace(\"MAX_\",\"\") }};'
+        "
+      ignore_errors: yes
+      when: options.protection_mode | default('MAX_PERFORMANCE') != 'MAX_PERFORMANCE'
+
+    # ── Start MRP ──────────────────────────────────────────────────────────
+    - name: Start Managed Recovery Process (MRP)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        SQL
+      when: options.start_mrp | default(true) | bool
+      register: mrp_start
+      ignore_errors: no
+
+    - name: Open standby READ ONLY (if Active Data Guard)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER DATABASE OPEN READ ONLY;
+        SQL
+      when: options.open_readonly | default(false) | bool
+      ignore_errors: yes
+
+    - name: Start real-time apply
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        SQL
+      when: options.real_time_apply | default(false) | bool
+      ignore_errors: yes
+
+    # ── CDB: Open PDBs ────────────────────────────────────────────────────
+    - name: Open all PDBs on standby (CDB)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
+        SQL
+      when:
+        - is_cdb | bool
+        - options.open_readonly | default(false) | bool
+      ignore_errors: yes
+
+    - name: Save PDB open state (CDB)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER PLUGGABLE DATABASE ALL SAVE STATE;
+        SQL
+      when: is_cdb | bool
+      ignore_errors: yes
+
+    # ── Create SPFILE and register with ASM ────────────────────────────────
+    - name: Create SPFILE in ASM (if ASM)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        CREATE SPFILE='{{ standby.asm_dg_data | default("+DATA") }}/{{ s_uniq }}/spfile{{ sid }}.ora' FROM MEMORY;
+        SHUTDOWN IMMEDIATE;
+        STARTUP MOUNT;
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        SQL
+      when: standby.storage_type | default('asm') == 'asm'
+      ignore_errors: yes
+
+    - name: Create init.ora pointing to ASM SPFILE
+      copy:
+        dest: "{{ oh }}/dbs/init{{ sid }}.ora"
+        content: "SPFILE='{{ standby.asm_dg_data | default('+DATA') }}/{{ s_uniq }}/spfile{{ sid }}.ora'"
+      when: standby.storage_type | default('asm') == 'asm'
+      ignore_errors: yes
+
+    - name: Verify MRP is running
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT PROCESS, STATUS, SEQUENCE# FROM V\$MANAGED_STANDBY WHERE PROCESS LIKE 'MRP%';" | sqlplus -s / as sysdba
+      register: mrp_check
+      changed_when: false
+
+    - name: Display MRP status
+      debug:
+        msg: "{{ mrp_check.stdout }}"

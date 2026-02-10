@@ -1,0 +1,115 @@
+---
+# ansible/playbooks/02_configure_primary.yml
+- name: "Configure Primary Database for Data Guard"
+  hosts: primary
+  gather_facts: yes
+  become: yes
+  become_user: "{{ primary.ssh_user | default('oracle') }}"
+  vars:
+    oh: "{{ primary.oracle_home }}"
+    sid: "{{ primary.sid }}"
+    p_uniq: "{{ primary.db_unique_name }}"
+    s_uniq: "{{ standby.db_unique_name }}"
+    srl_groups: "{{ network.standby_redo_groups | default(4) }}"
+    srl_size: "{{ network.standby_redo_size_mb | default(200) }}"
+    transport: "{{ network.redo_transport | default('ASYNC') }}"
+
+  tasks:
+    - name: Enable force logging
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<< "ALTER DATABASE FORCE LOGGING;"
+      when: options.force_logging | default(true) | bool
+      ignore_errors: no
+
+    - name: Enable flashback database
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<< "ALTER DATABASE FLASHBACK ON;"
+      when: options.flashback | default(true) | bool
+      ignore_errors: yes
+
+    - name: Get max log group number
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT MAX(GROUP#) FROM V\$LOG;" | sqlplus -s / as sysdba | grep -oP '\d+' | head -1
+      register: max_grp
+      changed_when: false
+
+    - name: Check existing standby redo logs
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        echo "SELECT COUNT(*) FROM V\$STANDBY_LOG;" | sqlplus -s / as sysdba | grep -oP '\d+' | head -1
+      register: srl_count
+      changed_when: false
+
+    - name: Create standby redo logs
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<< "ALTER DATABASE ADD STANDBY LOGFILE GROUP {{ (max_grp.stdout | int) + item }} SIZE {{ srl_size }}M;"
+      loop: "{{ range(1, (srl_groups | int) + 1) | list }}"
+      when: (srl_count.stdout | default('0') | int) == 0
+      ignore_errors: yes
+
+    - name: Set Data Guard parameters
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<SQL
+        ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ p_uniq }},{{ s_uniq }})' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ p_uniq }}' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE={{ s_uniq }} {{ transport }} VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ s_uniq }}' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2=ENABLE SCOPE=BOTH;
+        ALTER SYSTEM SET FAL_SERVER='{{ s_uniq }}' SCOPE=BOTH;
+        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_MAX_PROCESSES=8 SCOPE=BOTH;
+        SQL
+
+    - name: Copy password file to standby (filesystem)
+      fetch:
+        src: "{{ oh }}/dbs/orapw{{ sid }}"
+        dest: "/tmp/orapw{{ sid }}"
+        flat: yes
+      when: primary.storage_type | default('asm') != 'asm'
+
+    - name: Generate password file for standby (ASM - recreate)
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        orapwd file=/tmp/orapw{{ standby.sid }} password={{ oracle_sys_password }} entries=10 force=y
+      when: primary.storage_type | default('asm') == 'asm'
+
+    - name: Setup TNS on primary
+      blockinfile:
+        path: "{{ oh }}/network/admin/tnsnames.ora"
+        marker: "# {mark} STANDBY {{ s_uniq }}"
+        block: |
+          {{ s_uniq }} =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby.host }})(PORT = {{ standby.listener_port | default(1521) }}))
+              (CONNECT_DATA =
+                (SERVER = DEDICATED)
+                (SERVICE_NAME = {{ s_uniq }})))
+
+    - name: Ensure primary TNS entry exists too
+      blockinfile:
+        path: "{{ oh }}/network/admin/tnsnames.ora"
+        marker: "# {mark} PRIMARY {{ p_uniq }}"
+        block: |
+          {{ p_uniq }} =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary.host }})(PORT = {{ primary.listener_port | default(1521) }}))
+              (CONNECT_DATA =
+                (SERVER = DEDICATED)
+                (SERVICE_NAME = {{ p_uniq }})))
+
+    - name: Test TNS connectivity to standby (may fail if listener not yet configured)
+      shell: |
+        export ORACLE_HOME={{ oh }} PATH={{ oh }}/bin:$PATH
+        tnsping {{ s_uniq }}
+      register: tnsping
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Log switch to ship current redo
+      shell: |
+        export ORACLE_HOME={{ oh }} ORACLE_SID={{ sid }} PATH={{ oh }}/bin:$PATH
+        sqlplus -s / as sysdba <<< "ALTER SYSTEM ARCHIVE LOG CURRENT;"

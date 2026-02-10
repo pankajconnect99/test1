@@ -1,0 +1,195 @@
+---
+# ansible/playbooks/01_preflight.yml
+# Pre-flight checks on both primary and standby servers
+- name: "Pre-Flight Checks - Primary"
+  hosts: primary
+  gather_facts: yes
+  become: yes
+  become_user: "{{ primary.ssh_user | default('oracle') }}"
+  vars:
+    oh: "{{ primary.oracle_home }}"
+    sid: "{{ primary.sid }}"
+  tasks:
+
+    - name: Check SSH connectivity
+      ping:
+
+    - name: Verify Oracle Home exists
+      stat:
+        path: "{{ oh }}/bin/sqlplus"
+      register: sqlplus_check
+      failed_when: not sqlplus_check.stat.exists
+
+    - name: Check Oracle Home bin permissions
+      command: "{{ oh }}/bin/sqlplus -V"
+      register: sqlplus_version
+      changed_when: false
+
+    - name: Display Oracle version
+      debug:
+        msg: "{{ sqlplus_version.stdout }}"
+
+    - name: Check database is running
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export ORACLE_SID={{ sid }}
+        export PATH={{ oh }}/bin:$PATH
+        echo "SELECT STATUS FROM V\$INSTANCE;" | sqlplus -s / as sysdba
+      register: db_status
+      changed_when: false
+      failed_when: "'OPEN' not in db_status.stdout"
+
+    - name: Check archivelog mode
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export ORACLE_SID={{ sid }}
+        export PATH={{ oh }}/bin:$PATH
+        echo "SELECT LOG_MODE FROM V\$DATABASE;" | sqlplus -s / as sysdba
+      register: archivelog
+      changed_when: false
+
+    - name: FAIL if not in archivelog mode and check is enabled
+      fail:
+        msg: "Database {{ sid }} is NOT in ARCHIVELOG mode. Enable archivelog mode first."
+      when:
+        - options.archivelog_check | default(true) | bool
+        - "'ARCHIVELOG' not in archivelog.stdout"
+
+    - name: Check force logging status
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export ORACLE_SID={{ sid }}
+        export PATH={{ oh }}/bin:$PATH
+        echo "SELECT FORCE_LOGGING FROM V\$DATABASE;" | sqlplus -s / as sysdba
+      register: force_log
+      changed_when: false
+
+    - name: Check database role
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export ORACLE_SID={{ sid }}
+        export PATH={{ oh }}/bin:$PATH
+        echo "SELECT DATABASE_ROLE FROM V\$DATABASE;" | sqlplus -s / as sysdba
+      register: db_role
+      changed_when: false
+      failed_when: "'PRIMARY' not in db_role.stdout"
+
+    - name: Check password file exists
+      stat:
+        path: "{{ oh }}/dbs/orapw{{ sid }}"
+      register: orapwd
+      when: primary.storage_type | default('asm') != 'asm'
+
+    - name: Check ASM password file
+      shell: |
+        export ORACLE_HOME={{ primary.grid_home | default(oh) }}
+        export ORACLE_SID=+ASM
+        export PATH={{ primary.grid_home | default(oh) }}/bin:$PATH
+        asmcmd pwget --dbuniquename {{ primary.db_unique_name }}
+      register: asm_pwd
+      changed_when: false
+      when: primary.storage_type | default('asm') == 'asm'
+      ignore_errors: yes
+
+    - name: Check listener is running
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export PATH={{ oh }}/bin:$PATH
+        lsnrctl status {{ primary.listener_name | default('LISTENER') }}
+      register: lsnr_status
+      changed_when: false
+      failed_when: lsnr_status.rc != 0
+
+    - name: Get database size
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export ORACLE_SID={{ sid }}
+        export PATH={{ oh }}/bin:$PATH
+        echo "SELECT ROUND(SUM(BYTES)/1024/1024/1024,2)||' GB' AS DB_SIZE FROM DBA_DATA_FILES;" | sqlplus -s / as sysdba
+      register: db_size
+      changed_when: false
+
+    - name: Display database size
+      debug:
+        msg: "Database size: {{ db_size.stdout_lines | select('match', '.*GB.*') | first | default('unknown') }}"
+
+    - name: Check redo log info
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export ORACLE_SID={{ sid }}
+        export PATH={{ oh }}/bin:$PATH
+        echo "SELECT GROUP#, BYTES/1024/1024 MB, MEMBERS FROM V\$LOG;" | sqlplus -s / as sysdba
+      register: redo_info
+      changed_when: false
+
+    - name: Display redo log info
+      debug:
+        msg: "{{ redo_info.stdout }}"
+
+- name: "Pre-Flight Checks - Standby Server"
+  hosts: standby
+  gather_facts: yes
+  become: yes
+  become_user: "{{ standby.ssh_user | default('oracle') }}"
+  vars:
+    oh: "{{ standby.oracle_home }}"
+  tasks:
+
+    - name: Check SSH connectivity
+      ping:
+
+    - name: Verify Oracle Home exists
+      stat:
+        path: "{{ oh }}/bin/sqlplus"
+      register: sqlplus_check
+      failed_when: not sqlplus_check.stat.exists
+
+    - name: Check disk space (data)
+      shell: "df -h {{ standby.oracle_base | default('/u01/app/oracle') }} | tail -1 | awk '{print $4}'"
+      register: disk_space
+      changed_when: false
+
+    - name: Display available disk space
+      debug:
+        msg: "Available space on standby: {{ disk_space.stdout }}"
+
+    - name: Check ASM diskgroup space (if ASM)
+      shell: |
+        export ORACLE_HOME={{ standby.grid_home | default(oh) }}
+        export ORACLE_SID=+ASM
+        export PATH={{ standby.grid_home | default(oh) }}/bin:$PATH
+        echo "SELECT NAME, TOTAL_MB, FREE_MB FROM V\$ASM_DISKGROUP;" | sqlplus -s / as sysasm
+      register: asm_space
+      changed_when: false
+      when: standby.storage_type | default('asm') == 'asm'
+      ignore_errors: yes
+
+    - name: Display ASM space
+      debug:
+        msg: "{{ asm_space.stdout }}"
+      when: asm_space is defined and asm_space.stdout is defined
+
+    - name: Check listener is running on standby
+      shell: |
+        export ORACLE_HOME={{ oh }}
+        export PATH={{ oh }}/bin:$PATH
+        lsnrctl status {{ standby.listener_name | default('LISTENER') }}
+      register: lsnr_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Test network connectivity to primary
+      wait_for:
+        host: "{{ primary.host }}"
+        port: "{{ primary.listener_port | default(1521) }}"
+        timeout: 10
+      register: net_check
+
+    - name: Summary
+      debug:
+        msg: |
+          ═══ PRE-FLIGHT SUMMARY ═══
+          Oracle Home: {{ oh }} ✅
+          Disk Space: {{ disk_space.stdout }}
+          Listener: {{ 'Running' if lsnr_status.rc == 0 else 'Not Running (will configure)' }}
+          Network to Primary: {{ 'OK' if net_check is succeeded else 'FAILED' }}

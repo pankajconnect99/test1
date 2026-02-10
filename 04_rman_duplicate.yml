@@ -1,0 +1,195 @@
+---
+# ansible/playbooks/04_rman_duplicate.yml
+# RMAN Duplicate for ALL scenarios
+- name: "RMAN Duplicate - Create Physical Standby"
+  hosts: standby
+  gather_facts: yes
+  become: yes
+  become_user: "{{ standby.ssh_user | default('oracle') }}"
+  vars:
+    p_oh: "{{ primary.oracle_home }}"
+    s_oh: "{{ standby.oracle_home }}"
+    p_sid: "{{ primary.sid }}"
+    s_sid: "{{ standby.sid }}"
+    p_uniq: "{{ primary.db_unique_name }}"
+    s_uniq: "{{ standby.db_unique_name }}"
+    method: "{{ rman.method | default('active_duplicate') }}"
+    parallel: "{{ rman.parallelism | default(4) }}"
+    compress: "{{ rman.compression | default('NONE') }}"
+    section_size: "{{ rman.section_size_mb | default('') }}"
+    bkp_loc: "{{ rman.backup_location | default('') }}"
+    bkp_tag: "{{ rman.backup_tag | default('') }}"
+    db_fnc: "{{ rman.db_file_name_convert | default('') }}"
+    log_fnc: "{{ rman.log_file_name_convert | default('') }}"
+    nofilecheck: "{{ rman.nofilenamecheck | default(true) | bool }}"
+    extra_cmds: "{{ rman.additional_commands | default('') }}"
+    is_asm: "{{ standby.storage_type | default('asm') == 'asm' }}"
+    p_is_asm: "{{ primary.storage_type | default('asm') == 'asm' }}"
+    is_cdb: "{{ primary.is_cdb | default(false) | bool }}"
+    asm_data: "{{ standby.asm_dg_data | default('+DATA') }}"
+    asm_fra: "{{ standby.asm_dg_fra | default('+FRA') }}"
+    is_active: "{{ 'active' in method }}"
+
+  tasks:
+
+    - name: Record start time
+      set_fact:
+        rman_start: "{{ ansible_date_time.iso8601 }}"
+
+    - name: Generate RMAN duplicate script
+      copy:
+        dest: "/tmp/rman_duplicate_{{ s_sid }}.rman"
+        content: |
+          # RMAN Duplicate Script - Generated {{ ansible_date_time.iso8601 }}
+          # Method: {{ method }}
+          # Primary: {{ p_uniq }} ({{ primary.host }})
+          # Standby: {{ s_uniq }} ({{ standby.host }})
+          # Parallelism: {{ parallel }} channels
+          # Compression: {{ compress }}
+
+          RUN {
+          {% for i in range(1, (parallel | int) + 1) %}
+          {% if is_active | bool %}
+            ALLOCATE CHANNEL ch{{ i }} DEVICE TYPE DISK;
+            ALLOCATE AUXILIARY CHANNEL aux{{ i }} DEVICE TYPE DISK;
+          {% elif bkp_loc | length > 0 %}
+            ALLOCATE AUXILIARY CHANNEL aux{{ i }} DEVICE TYPE DISK;
+          {% else %}
+            ALLOCATE AUXILIARY CHANNEL aux{{ i }} DEVICE TYPE DISK;
+          {% endif %}
+          {% endfor %}
+
+            DUPLICATE TARGET DATABASE
+              FOR STANDBY
+              FROM {% if is_active | bool %}ACTIVE DATABASE{% endif %}
+
+          {% if not is_active | bool and bkp_loc | length > 0 %}
+              BACKUP LOCATION '{{ bkp_loc }}'
+          {% endif %}
+          {% if bkp_tag | length > 0 %}
+              TAG '{{ bkp_tag }}'
+          {% endif %}
+
+              DORECOVER
+          {% if nofilecheck | bool %}
+              NOFILENAMECHECK
+          {% endif %}
+
+          {% if compress != 'NONE' %}
+              USING COMPRESSED BACKUPSET
+          {% endif %}
+
+          {% if section_size | length > 0 and (section_size | int) > 0 %}
+              SECTION SIZE {{ section_size }}M
+          {% endif %}
+
+          {% if db_fnc | length > 0 %}
+              DB_FILE_NAME_CONVERT {{ db_fnc }}
+          {% endif %}
+          {% if log_fnc | length > 0 %}
+              LOG_FILE_NAME_CONVERT {{ log_fnc }}
+          {% endif %}
+
+              SPFILE
+          {% if is_asm | bool %}
+                SET DB_UNIQUE_NAME='{{ s_uniq }}'
+                SET DB_CREATE_FILE_DEST='{{ asm_data }}'
+                SET DB_RECOVERY_FILE_DEST='{{ asm_fra }}'
+                SET DB_RECOVERY_FILE_DEST_SIZE='100G'
+                SET CONTROL_FILES='{{ asm_data }}','{{ asm_fra }}'
+          {% else %}
+                SET DB_UNIQUE_NAME='{{ s_uniq }}'
+                SET DB_CREATE_FILE_DEST='{{ standby.data_dir }}'
+                SET DB_RECOVERY_FILE_DEST='{{ standby.fra_dir | default(standby.data_dir + "/fra") }}'
+                SET DB_RECOVERY_FILE_DEST_SIZE='100G'
+          {% endif %}
+                SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ p_uniq }},{{ s_uniq }})'
+                SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ s_uniq }}'
+                SET LOG_ARCHIVE_DEST_2='SERVICE={{ p_uniq }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ p_uniq }}'
+                SET FAL_SERVER='{{ p_uniq }}'
+                SET AUDIT_FILE_DEST='{{ standby.oracle_base | default("/u01/app/oracle") }}/admin/{{ s_sid }}/adump'
+                SET DIAGNOSTIC_DEST='{{ standby.oracle_base | default("/u01/app/oracle") }}'
+          {% if is_cdb | bool %}
+                SET ENABLE_PLUGGABLE_DATABASE='TRUE'
+          {% endif %}
+          ;
+
+          {% if extra_cmds | length > 0 %}
+          {{ extra_cmds }}
+          {% endif %}
+          }
+        owner: "{{ standby.ssh_user | default('oracle') }}"
+        mode: '0644'
+
+    - name: Display RMAN script
+      shell: cat /tmp/rman_duplicate_{{ s_sid }}.rman
+      register: rman_script
+      changed_when: false
+
+    - name: Show RMAN script
+      debug:
+        msg: "{{ rman_script.stdout }}"
+
+    # ── Execute RMAN ───────────────────────────────────────────────────────
+    - name: Execute RMAN Duplicate (Active)
+      shell: |
+        export ORACLE_HOME={{ s_oh }} ORACLE_SID={{ s_sid }} PATH={{ s_oh }}/bin:$PATH
+        rman TARGET sys/{{ oracle_sys_password }}@{{ p_uniq }} AUXILIARY sys/{{ oracle_sys_password }}@{{ s_uniq }} \
+          LOG /tmp/rman_duplicate_{{ s_sid }}.log \
+          CMDFILE /tmp/rman_duplicate_{{ s_sid }}.rman
+      when: is_active | bool
+      register: rman_result
+      async: 86400  # 24h timeout
+      poll: 60      # check every 60s
+      failed_when: rman_result.rc != 0
+
+    - name: Execute RMAN Duplicate (Backup-Based)
+      shell: |
+        export ORACLE_HOME={{ s_oh }} ORACLE_SID={{ s_sid }} PATH={{ s_oh }}/bin:$PATH
+        rman AUXILIARY sys/{{ oracle_sys_password }}@{{ s_uniq }} \
+          LOG /tmp/rman_duplicate_{{ s_sid }}.log \
+          CMDFILE /tmp/rman_duplicate_{{ s_sid }}.rman
+      when: not (is_active | bool)
+      register: rman_bkp_result
+      async: 86400
+      poll: 60
+      failed_when: rman_bkp_result.rc != 0
+
+    - name: Record end time
+      set_fact:
+        rman_end: "{{ ansible_date_time.iso8601 }}"
+
+    - name: Fetch RMAN log
+      fetch:
+        src: "/tmp/rman_duplicate_{{ s_sid }}.log"
+        dest: "/tmp/rman_duplicate_{{ s_sid }}.log"
+        flat: yes
+      ignore_errors: yes
+
+    - name: Check for RMAN errors in log
+      shell: grep -i "RMAN-\|ORA-" /tmp/rman_duplicate_{{ s_sid }}.log | head -20 || true
+      register: rman_errors
+      changed_when: false
+
+    - name: Display RMAN errors if any
+      debug:
+        msg: "{{ rman_errors.stdout }}"
+      when: rman_errors.stdout | length > 0
+
+    - name: Verify standby database is mounted
+      shell: |
+        export ORACLE_HOME={{ s_oh }} ORACLE_SID={{ s_sid }} PATH={{ s_oh }}/bin:$PATH
+        echo "SELECT STATUS FROM V\$INSTANCE;" | sqlplus -s / as sysdba
+      register: post_status
+      changed_when: false
+      failed_when: "'MOUNTED' not in post_status.stdout and 'OPEN' not in post_status.stdout"
+
+    - name: Summary
+      debug:
+        msg: |
+          ═══ RMAN DUPLICATE COMPLETE ═══
+          Method: {{ method }}
+          Start:  {{ rman_start }}
+          End:    {{ rman_end }}
+          Status: {{ 'SUCCESS' if (rman_result is succeeded or rman_bkp_result is succeeded) else 'CHECK LOG' }}
+          Log:    /tmp/rman_duplicate_{{ s_sid }}.log
